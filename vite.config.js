@@ -6,12 +6,6 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api/customer-support': {
-        target: 'http://localhost:5001',
-        changeOrigin: true,
-        secure: false,
-        rewrite: (path) => path.replace(/^\/api\/customer-support/, '')
-      },
       '/api': {
         target: 'http://localhost:5000',
         changeOrigin: true,

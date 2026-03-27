@@ -57,7 +57,7 @@ const CustomerSupportChat = () => {
 
   const fetchTickets = async () => {
     try {
-      const res = await fetch('/api/customer-support/tickets');
+      const res = await fetch('/api/support/tickets');
       const json = await res.json();
       if (json.status === 'success') {
         setTickets(json.data);
@@ -70,7 +70,7 @@ const CustomerSupportChat = () => {
   const fetchMessages = async (ticketId, load = true) => {
     if (load) setLoading(true);
     try {
-      const res = await fetch(`/api/customer-support/tickets/${ticketId}/messages`);
+      const res = await fetch(`/api/support/tickets/${ticketId}/messages`);
       const json = await res.json();
       if (json.status === 'success') {
         setMessages(json.data);
@@ -85,7 +85,7 @@ const CustomerSupportChat = () => {
   const createTicket = async (category, title) => {
     setLoading(true);
     try {
-      const res = await fetch('/api/customer-support/tickets', {
+      const res = await fetch('/api/support/tickets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ category, title, description: "New user inquiry." })
@@ -121,7 +121,7 @@ const CustomerSupportChat = () => {
     setMessages(prev => [...prev, optMsg]);
 
     try {
-      await fetch(`/api/customer-support/tickets/${activeTicketId}/messages`, {
+      await fetch(`/api/support/tickets/${activeTicketId}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: tmpMessage })
