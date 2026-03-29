@@ -1,6 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MessageSquare, X, Send, User, Zap, Paperclip, Smile, Settings, ChevronLeft, Calendar, HelpCircle, Truck, CreditCard } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useSocket } from '../../hooks/useSocket';
+import { supportAPI } from '../../services/api';
+import useAuthStore from '../../store/authStore';
+import toast from 'react-hot-toast';
 
 const CustomerSupportChat = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -11,20 +15,123 @@ const CustomerSupportChat = () => {
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [agentTyping, setAgentTyping] = useState(null);
+
+  const { socket, on, emit } = useSocket();
+  const { isAuthenticated, user } = useAuthStore();
+  const typingTimeoutRef = useRef(null);
   
   const scrollRef = useRef(null);
   const chatContainerRef = useRef(null);
+  const audioRef = useRef(new Audio('https://assets.mixkit.co/active_storage/sfx/2354/2354-preview.mp3'));
 
-  // Poll for messages
+  // Remove old polling logic. Use Sockets instead.
   useEffect(() => {
-    let interval;
-    if (isOpen && currentView === 'chat' && activeTicketId) {
-      interval = setInterval(() => {
-        fetchMessages(activeTicketId, false);
-      }, 3000);
-    }
-    return () => clearInterval(interval);
-  }, [isOpen, currentView, activeTicketId]);
+    if (!socket || !activeTicketId) return;
+    
+    // Join room whenever active ticket changes
+    emit('support:room:join', activeTicketId);
+
+    const cleanup = [
+      on('support:message:new', (msg) => {
+        if (msg.ticketId === activeTicketId || msg.ticket_id === activeTicketId) {
+          setMessages(prev => {
+            // 1. Avoid exact ID duplicates
+            if (prev.find(m => m.id === msg.id)) return prev;
+            
+            // 2. Check for optimistic "temp" message with same text and type
+            const tempIndex = prev.findIndex(m => 
+              m.id?.toString().startsWith('temp-') && 
+              m.text === (msg.content || msg.text) &&
+              (m.type === (msg.senderType || msg.type))
+            );
+
+            if (tempIndex !== -1) {
+              const next = [...prev];
+              next[tempIndex] = {
+                ...msg,
+                type: msg.senderType || msg.type,
+                text: msg.content || msg.text,
+                time: msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now'
+              };
+              return next;
+            }
+
+            return [...prev, {
+              ...msg,
+              type: msg.senderType || msg.type,
+              text: msg.content || msg.text,
+              time: msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now'
+            }];
+          });
+
+          // Notification logic for guests
+          if ((msg.senderType === 'agent' || msg.senderType === 'bot') && !isOpen) {
+            toast('New message from Support', { 
+              icon: '💬',
+              onClick: () => setIsOpen(true)
+            });
+            audioRef.current.play().catch(() => {});
+          }
+        }
+      }),
+      on('typing:start', ({ ticketId, firstName }) => {
+        if (ticketId === activeTicketId) {
+          setAgentTyping(firstName || 'Agent');
+        }
+      }),
+      on('typing:stop', ({ ticketId }) => {
+        if (ticketId === activeTicketId) {
+          setAgentTyping(null);
+        }
+      }),
+      on('support:handover', (data) => {
+        const name = data?.agentName || data?.name || data?.first_name || 
+                     (data?.agent?.first_name ? `${data.agent.first_name} ${data.agent.last_name || ''}`.trim() : null) ||
+                     (data?.user?.first_name ? `${data.user.first_name} ${data.user.last_name || ''}`.trim() : null) ||
+                     'Support Specialist';
+        setMessages(prev => [...prev, {
+          id: 'handover-' + Date.now(),
+          type: 'system',
+          text: `Agent ${name} has joined the conversation.`,
+          time: 'System'
+        }]);
+      }),
+      on('support:ticket:updated', (ticket) => {
+        if (ticket.id === activeTicketId && ticket.assignedTo) {
+          const agent = ticket.assignedTo;
+          const name = agent.first_name ? `${agent.first_name} ${agent.last_name || ''}`.trim() : 
+                       agent.name || agent.firstName || 'Support Specialist';
+          
+          // Only add handover message if we didn't have an assignee before
+          setMessages(prev => {
+            const alreadyHandover = prev.some(m => m.type === 'system' && m.text.includes('joined'));
+            if (alreadyHandover) return prev;
+
+            return [...prev, {
+              id: 'handover-' + Date.now(),
+              type: 'system',
+              text: `Agent ${name} has joined the conversation.`,
+              time: 'System'
+            }];
+          });
+        }
+      }),
+      on('support:ticket:resolved', ({ id }) => {
+        if (id === activeTicketId) {
+          setMessages(prev => [...prev, {
+            id: 'resolved-' + Date.now(),
+            type: 'system',
+            text: `This ticket has been marked as resolved.`,
+            time: 'System'
+          }]);
+        }
+      })
+    ];
+
+    return () => cleanup.forEach(fn => fn && fn());
+  }, [socket, activeTicketId, on, emit]);
 
   // Initial fetch for tickets when opened
   useEffect(() => {
@@ -57,10 +164,9 @@ const CustomerSupportChat = () => {
 
   const fetchTickets = async () => {
     try {
-      const res = await fetch('/api/support/tickets');
-      const json = await res.json();
-      if (json.status === 'success') {
-        setTickets(json.data);
+      const res = await supportAPI.getTickets();
+      if (res.data.success || res.data.status === 'success') {
+        setTickets(res.data.data);
       }
     } catch (err) {
       console.error("Failed to fetch tickets", err);
@@ -70,10 +176,14 @@ const CustomerSupportChat = () => {
   const fetchMessages = async (ticketId, load = true) => {
     if (load) setLoading(true);
     try {
-      const res = await fetch(`/api/support/tickets/${ticketId}/messages`);
-      const json = await res.json();
-      if (json.status === 'success') {
-        setMessages(json.data);
+      const res = await supportAPI.getMessages(ticketId);
+      if ((res.data.success || res.data.status === 'success') && Array.isArray(res.data.data)) {
+        setMessages(res.data.data.map(m => ({
+          ...m,
+          type: m.senderType || m.type,
+          text: m.content || m.text,
+          time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        })));
       }
     } catch (err) {
       console.error("Failed to fetch messages", err);
@@ -85,16 +195,25 @@ const CustomerSupportChat = () => {
   const createTicket = async (category, title) => {
     setLoading(true);
     try {
-      const res = await fetch('/api/support/tickets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ category, title, description: "New user inquiry." })
-      });
-      const json = await res.json();
-      if (json.status === 'success') {
-        setActiveTicketId(json.data.id);
+      const payload = { 
+        category, 
+        title, 
+        description: "New user inquiry." 
+      };
+      
+      if (!isAuthenticated) {
+        payload.guestName = "Guest User"; // In a real app, you might ask for this
+        payload.guestEmail = "guest@example.com";
+      }
+
+      const res = await supportAPI.createTicket(payload);
+      if (res.data.success || res.data.status === 'success') {
+        const ticketId = res.data.data.id || res.data.data.ticket?.id;
+        setActiveTicketId(ticketId);
         setCurrentView('chat');
-        fetchMessages(json.data.id);
+        // Join room immediately
+        emit('support:room:join', ticketId);
+        fetchMessages(ticketId);
       }
     } catch (err) {
       console.error('Failed to create ticket', err);
@@ -109,6 +228,11 @@ const CustomerSupportChat = () => {
 
     const tmpMessage = message;
     setMessage('');
+    
+    // Stop typing indicator
+    setIsTyping(false);
+    emit('typing:stop', { ticketId: activeTicketId });
+    clearTimeout(typingTimeoutRef.current);
 
     // Optimistic UI Update
     const optMsg = {
@@ -121,16 +245,42 @@ const CustomerSupportChat = () => {
     setMessages(prev => [...prev, optMsg]);
 
     try {
-      await fetch(`/api/support/tickets/${activeTicketId}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: tmpMessage })
-      });
-      // Immediately fetch again
-      fetchMessages(activeTicketId, false);
+      const res = await supportAPI.sendMessage(activeTicketId, { text: tmpMessage });
+      // Emit message:send after successful POST
+      if (res.data.success || res.data.status === 'success') {
+        emit('message:send', { ticketId: activeTicketId, message: res.data.data });
+        // Update the optimistic message with real data if needed or just fetch
+        fetchMessages(activeTicketId, false);
+      }
     } catch (err) {
       console.error("Failed to send msg", err);
+      // Remove optimistic message on error
+      setMessages(prev => prev.filter(m => m.id !== optMsg.id));
     }
+  };
+
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    setMessage(val);
+
+    if (!activeTicketId) return;
+
+    if (!isTyping && val.trim().length > 0) {
+      setIsTyping(true);
+      emit('typing:start', { ticketId: activeTicketId });
+    } else if (isTyping && val.trim().length === 0) {
+      setIsTyping(false);
+      emit('typing:stop', { ticketId: activeTicketId });
+    }
+
+    // Auto-stop typing after 2 seconds of inactivity
+    clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      if (isTyping) {
+        setIsTyping(false);
+        emit('typing:stop', { ticketId: activeTicketId });
+      }
+    }, 2000);
   };
 
   const handleBack = () => {
@@ -297,6 +447,16 @@ const CustomerSupportChat = () => {
                       </motion.div>
                     ))
                   )}
+                  {agentTyping && (
+                    <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} className="flex gap-2 items-center text-[11px] text-gray-500 italic pb-2">
+                      <div className="flex gap-1">
+                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                      </div>
+                      {agentTyping} is typing...
+                    </motion.div>
+                  )}
                 </div>
 
                 <div className="p-4 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 flex-shrink-0 relative">
@@ -305,7 +465,7 @@ const CustomerSupportChat = () => {
                       type="text"
                       placeholder="Type your message..."
                       value={message}
-                      onChange={(e) => setMessage(e.target.value)}
+                      onChange={handleInputChange}
                       className="w-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-800 dark:text-gray-100 rounded-xl pl-4 pr-24 py-3 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 dark:focus:ring-indigo-900/40 transition-all placeholder:text-gray-400"
                     />
                     <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">

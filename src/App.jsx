@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import useAuthStore from './store/authStore'
 import AppLayout from './components/layout/AppLayout'
 import CustomerSupportChat from './components/ui/CustomerSupportChat'
@@ -29,6 +29,7 @@ const ReportsPage = lazy(() => import('./pages/ReportsPage'))
 const UserDashboardPage = lazy(() => import('./pages/UserDashboardPage'))
 const EmailSettingsPage = lazy(() => import('./pages/EmailSettingsPage'))
 const ChatPage = lazy(() => import('./pages/ChatPage'))
+const SupportManagementPage = lazy(() => import('./pages/SupportManagementPage'))
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'))
 
 /* ── Helper Component for Suspense ───────────────────────────── */
@@ -120,14 +121,21 @@ export default function App() {
 
             {/* ── Profile — always accessible ──────────────────────── */}
             <Route path="chat" element={<ProtectedRoute module="chat"><ChatPage /></ProtectedRoute>} />
+            <Route path="support-management" element={<ProtectedRoute module="dashboard"><SupportManagementPage /></ProtectedRoute>} />
             <Route path="profile" element={<ProfilePage />} />
           </Route>
 
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </Suspense>
-      <CustomerSupportChat />
+      <ChatVisibilityWrapper />
     </BrowserRouter>
   )
+}
+
+function ChatVisibilityWrapper() {
+  const { pathname } = useLocation()
+  if (pathname === '/login') return null
+  return <CustomerSupportChat />
 }
 

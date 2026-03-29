@@ -16,6 +16,7 @@ import {
   CheckCircle2, MessageSquare, Zap
 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
+import { useSocket } from '../../hooks/useSocket'
 
 const TYPE_CONFIG = {
   task:    { icon: CheckSquare,  color: '#6366f1', bg: 'rgba(99,102,241,0.1)'  },
@@ -44,6 +45,7 @@ export default function NotificationBell() {
   const panelRef        = useRef(null)
   const queryClient     = useQueryClient()
   const navigate        = useNavigate()
+  const [virtualNotifications, setVirtualNotifications] = useState([]);
 
   /* Poll every 30s — fast enough to feel real-time */
   const { data } = useQuery({
@@ -55,6 +57,63 @@ export default function NotificationBell() {
 
   const notifications = data?.notifications || []
   const unreadCount   = data?.unreadCount || 0
+
+  // Combine virtual and real notifications
+  const allNotifications = [...virtualNotifications, ...notifications].filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+  const totalUnread = unreadCount + virtualNotifications.filter(n => !n.is_read).length;
+
+  const { on } = useSocket();
+
+  useEffect(() => {
+    const cleanup = [
+      on('support:message:new', (msg) => {
+        queryClient.invalidateQueries(['notifications']);
+        setVirtualNotifications(prev => [
+          {
+            id: `v-msg-${msg.id || Date.now()}`,
+            type: 'info',
+            title: 'New Support Message',
+            message: msg.content || msg.text,
+            created_at: new Date().toISOString(),
+            is_read: false,
+            link: '/support-management'
+          },
+          ...prev
+        ]);
+      }),
+      on('support:ticket:new', (ticket) => {
+        queryClient.invalidateQueries(['notifications']);
+        setVirtualNotifications(prev => [
+          {
+            id: `v-tkt-${ticket.id || Date.now()}`,
+            type: 'success',
+            title: 'New Support Ticket',
+            message: `${ticket.category}: ${ticket.title}`,
+            created_at: new Date().toISOString(),
+            is_read: false,
+            link: '/support-management'
+          },
+          ...prev
+        ]);
+      }),
+      on('support:ticket:updated', (ticket) => {
+        queryClient.invalidateQueries(['notifications']);
+        setVirtualNotifications(prev => [
+          {
+            id: `v-upd-${ticket.id || Date.now()}-${Date.now()}`,
+            type: 'warning',
+            title: 'Support Ticket Updated',
+            message: `Ticket "${ticket.title}" status: ${ticket.status}`,
+            created_at: new Date().toISOString(),
+            is_read: false,
+            link: '/support-management'
+          },
+          ...prev
+        ]);
+      })
+    ];
+    return () => cleanup.forEach(fn => fn && fn());
+  }, [on, queryClient]);
 
   /* Close on outside click */
   useEffect(() => {
@@ -90,7 +149,9 @@ export default function NotificationBell() {
   })
 
   const handleNotifClick = async (notif) => {
-    if (!notif.is_read) {
+    if (notif.id.toString().startsWith('v-')) {
+      setVirtualNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, is_read: true } : n));
+    } else if (!notif.is_read) {
       markReadMutation.mutate(notif.id)
     }
     if (notif.link) {
@@ -100,8 +161,8 @@ export default function NotificationBell() {
   }
 
   const displayed = tab === 'unread'
-    ? notifications.filter(n => !n.is_read)
-    : notifications
+    ? allNotifications.filter(n => !n.is_read)
+    : allNotifications
 
   return (
     <div className="relative" ref={panelRef}>
@@ -115,10 +176,10 @@ export default function NotificationBell() {
           color: 'rgb(var(--text-secondary))',
         }}>
         <Bell size={15} />
-        {unreadCount > 0 && (
+        {totalUnread > 0 && (
           <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] rounded-full flex items-center justify-center text-white font-bold"
             style={{ background: 'rgb(var(--accent))', fontSize: 9, padding: '0 4px' }}>
-            {unreadCount > 99 ? '99+' : unreadCount}
+            {totalUnread > 99 ? '99+' : totalUnread}
           </span>
         )}
       </button>
@@ -135,8 +196,8 @@ export default function NotificationBell() {
               <span className="font-semibold text-sm" style={{ color: 'rgb(var(--text-primary))' }}>
                 Notifications
               </span>
-              {unreadCount > 0 && (
-                <span className="badge badge-accent" style={{ fontSize: 10 }}>{unreadCount} new</span>
+              {totalUnread > 0 && (
+                <span className="badge badge-accent" style={{ fontSize: 10 }}>{totalUnread} new</span>
               )}
             </div>
             <div className="flex items-center gap-1">
@@ -162,8 +223,8 @@ export default function NotificationBell() {
           {/* Tabs */}
           <div className="flex gap-0.5 px-3 pt-2">
             {[
-              { id: 'all',    label: `All (${notifications.length})` },
-              { id: 'unread', label: `Unread (${unreadCount})` },
+              { id: 'all',    label: `All (${allNotifications.length})` },
+              { id: 'unread', label: `Unread (${totalUnread})` },
             ].map(t => (
               <button key={t.id} onClick={() => setTab(t.id)}
                 className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
@@ -249,7 +310,7 @@ export default function NotificationBell() {
           <div className="px-4 py-2.5"
             style={{ borderTop: '1px solid rgba(var(--border))' }}>
             <p className="text-xs text-center" style={{ color: 'rgb(var(--text-muted))' }}>
-              Refreshes every 30 seconds · {notifications.length} total
+              Refreshes every 30 seconds · {allNotifications.length} total
             </p>
           </div>
         </div>

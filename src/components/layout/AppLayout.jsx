@@ -12,6 +12,8 @@ import useThemeStore from '../../store/themeStore'
 import NotificationBell from '../ui/NotificationBell'
 import CompanyContextBar from '../ui/CompanyContextBar'
 import toast from 'react-hot-toast'
+import { useQuery } from '@tanstack/react-query'
+import { notificationsAPI } from '../../services/api'
 
 /* ── Nav definition ──────────────────────────────────────────────── */
 const NAV_GROUPS = [
@@ -54,6 +56,7 @@ const NAV_GROUPS = [
       { path: '/projects', icon: Briefcase,  label: 'Projects', module: 'projects' },
       { path: '/tasks',    icon: CheckSquare,    label: 'Tasks',    module: 'tasks' },
       { path: '/chat',     icon: MessageSquare,  label: 'Chat',     module: 'chat' },
+      { path: '/support-management', icon: MessageSquare, label: 'Support', module: 'dashboard' },
     ]
   },
   {
@@ -79,6 +82,14 @@ const NAV_GROUPS = [
 function NavGroup({ group, onClose, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen)
   const { canAccess } = useAuthStore()
+  
+  const { data } = useQuery({
+    queryKey: ['notifications'],
+    queryFn: () => notificationsAPI.getAll({ limit: 10 }).then(r => r.data.data),
+    staleTime: 30000,
+  })
+  const unreadCount = data?.unreadCount || 0
+
   const visible = group.items.filter(i => canAccess(i.module))
   if (!visible.length) return null
   return (
@@ -93,13 +104,23 @@ function NavGroup({ group, onClose, defaultOpen = true }) {
           : <ChevronRight size={11} />
         }
       </button>
-      {open && visible.map(({ path, icon: Icon, label }) => (
-        <NavLink key={path} to={path} onClick={onClose}
-          className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
-          <Icon size={15} className="nav-icon flex-shrink-0" />
-          <span className="flex-1 text-sm">{label}</span>
-        </NavLink>
-      ))}
+      {open && visible.map(({ path, icon: Icon, label }) => {
+        const isSupport = path === '/support-management'
+        const hasUnread = isSupport && unreadCount > 0
+        
+        return (
+          <NavLink key={path} to={path} onClick={onClose}
+            className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
+            <div className="relative">
+              <Icon size={15} className="nav-icon flex-shrink-0" />
+              {hasUnread && (
+                <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full border-2 border-white dark:border-gray-900" />
+              )}
+            </div>
+            <span className="flex-1 text-sm">{label}</span>
+          </NavLink>
+        )
+      })}
     </div>
   )
 }

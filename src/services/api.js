@@ -303,3 +303,13 @@ export const chatAPI = {
   leaveRoom:     (roomId) => api.delete(`/chat/rooms/${roomId}/leave`),
   markRead:      (roomId) => api.put(`/chat/rooms/${roomId}/read`),
 };
+
+export const supportAPI = {
+  getTickets:   () => api.get('/support/tickets'),
+  getAgents:    () => api.get('/support/agents'),
+  createTicket: (data) => api.post('/support/tickets', data),
+  getMessages:  (id) => api.get(`/support/tickets/${id}/messages`),
+  sendMessage:  (id, data) => api.post(`/support/tickets/${id}/messages`, data),
+  assign:       (id, agentId) => api.post(`/support/tickets/${id}/assign`, agentId ? { agentId } : {}),
+  resolve:      (id) => api.patch(`/support/tickets/${id}/resolve`),
+};
