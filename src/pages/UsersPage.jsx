@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { usersAPI, rolesAPI, departmentsAPI, companiesAPI, sitesAPI } from '../services/api'
 import { useNavigate } from 'react-router-dom'
@@ -17,16 +17,56 @@ const STATUS_BADGE = {
 
 function UserModal({ user, roles, departments, companies, sites, onClose, onSaved }) {
   const isEdit = !!user
-  const { register, handleSubmit, watch, formState: { errors, isSubmitting } } = useForm({
-    defaultValues: user
-      ? {
-          firstName: user.first_name, lastName: user.last_name,
-          email: user.email, phone: user.phone, designation: user.designation,
-          departmentId: user.department_id, status: user.status,
-          roleIds: user.roles?.map(r => r.id) || [],
-        }
-      : { status: 'active' }
+  const [loadingUser, setLoadingUser] = useState(isEdit)
+  const { register, handleSubmit, watch, reset, formState: { errors, isSubmitting } } = useForm({
+    defaultValues: { status: 'active' }
   })
+
+  // Fetch full user details on edit so all fields are populated
+  useEffect(() => {
+    if (!isEdit) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data } = await usersAPI.getById(user.id)
+        const u = data.data
+        if (cancelled) return
+
+        // Roles from getById may be objects {id, name} or strings — handle both
+        const roleIds = (u.roles || []).map(r => typeof r === 'object' ? String(r.id) : String(r))
+
+        reset({
+          firstName: u.first_name || '',
+          lastName: u.last_name || '',
+          email: u.email || '',
+          phone: u.phone || '',
+          designation: u.designation || '',
+          departmentId: u.department_id ? String(u.department_id) : '',
+          companyId: u.company_id ? String(u.company_id) : '',
+          siteId: u.site_id ? String(u.site_id) : '',
+          status: u.status || 'active',
+          roleIds,
+        })
+      } catch (err) {
+        // Fallback to the list-level data if getById fails
+        const roleIds = (user.roles || []).map(r => typeof r === 'object' ? String(r.id) : '')
+          .filter(Boolean)
+        reset({
+          firstName: user.first_name || '',
+          lastName: user.last_name || '',
+          email: user.email || '',
+          phone: user.phone || '',
+          designation: user.designation || '',
+          departmentId: user.department_id ? String(user.department_id) : '',
+          status: user.status || 'active',
+          roleIds,
+        })
+      } finally {
+        if (!cancelled) setLoadingUser(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [user, isEdit, reset])
 
   const onSubmit = async (data) => {
     // Validate password on create
@@ -58,6 +98,15 @@ function UserModal({ user, roles, departments, companies, sites, onClose, onSave
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="p-5 space-y-4 overflow-y-auto" style={{ maxHeight: '80vh' }}>
+          {loadingUser ? (
+            <div className="flex items-center justify-center py-16">
+              <svg className="animate-spin w-7 h-7" style={{ color: 'rgb(var(--accent-light))' }} viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeDasharray="32" strokeDashoffset="32" />
+              </svg>
+              <span className="ml-3 text-sm" style={{ color: 'rgb(var(--text-muted))' }}>Loading user details...</span>
+            </div>
+          ) : (
+          <>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="label">First Name *</label>
@@ -158,6 +207,8 @@ function UserModal({ user, roles, departments, companies, sites, onClose, onSave
               {isSubmitting ? 'Saving...' : isEdit ? 'Update User' : 'Create User'}
             </button>
           </div>
+          </>
+          )}
         </form>
       </div>
     </div>

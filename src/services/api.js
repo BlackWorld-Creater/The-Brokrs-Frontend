@@ -35,8 +35,13 @@ api.interceptors.response.use(
     const originalRequest = error.config;
 
     if (error.response?.status === 401 && !originalRequest._retry) {
-      if (originalRequest.url === '/auth/refresh' || originalRequest.url === '/auth/login') {
-        // Redirect to login
+      // Login failures should pass through so the UI can show a toast
+      if (originalRequest.url === '/auth/login') {
+        return Promise.reject(error);
+      }
+
+      if (originalRequest.url === '/auth/refresh') {
+        // Refresh failed — force re-login
         localStorage.clear();
         window.location.href = '/login';
         return Promise.reject(error);
