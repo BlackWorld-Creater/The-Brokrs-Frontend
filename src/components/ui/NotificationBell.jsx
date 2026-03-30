@@ -5,6 +5,7 @@
  * - Groups by type (tasks, system, etc.)
  * - Click to mark as read, link navigates
  * - Shows actor avatar + message
+ * - Real-time socket notifications (filtered to avoid self-notifications)
  */
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -17,6 +18,7 @@ import {
 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { useSocket } from '../../hooks/useSocket'
+import useAuthStore from '../../store/authStore'
 
 const TYPE_CONFIG = {
   task:    { icon: CheckSquare,  color: '#6366f1', bg: 'rgba(99,102,241,0.1)'  },
@@ -26,6 +28,7 @@ const TYPE_CONFIG = {
   company: { icon: Building2,    color: '#6366f1', bg: 'rgba(99,102,241,0.1)'  },
   site:    { icon: MapPin,       color: '#22c55e', bg: 'rgba(34,197,94,0.1)'   },
   service: { icon: Globe2,       color: '#06b6d4', bg: 'rgba(6,182,212,0.1)'   },
+  support: { icon: MessageSquare, color: '#8b5cf6', bg: 'rgba(139,92,246,0.1)' },
 }
 
 function NotifIcon({ type }) {
@@ -45,6 +48,7 @@ export default function NotificationBell() {
   const panelRef        = useRef(null)
   const queryClient     = useQueryClient()
   const navigate        = useNavigate()
+  const { user } = useAuthStore()
   const [virtualNotifications, setVirtualNotifications] = useState([]);
 
   /* Poll every 30s — fast enough to feel real-time */
@@ -58,7 +62,7 @@ export default function NotificationBell() {
   const notifications = data?.notifications || []
   const unreadCount   = data?.unreadCount || 0
 
-  // Combine virtual and real notifications
+  // Combine virtual and real notifications — deduplicate by id
   const allNotifications = [...virtualNotifications, ...notifications].filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
   const totalUnread = unreadCount + virtualNotifications.filter(n => !n.is_read).length;
 
@@ -67,53 +71,105 @@ export default function NotificationBell() {
   useEffect(() => {
     const cleanup = [
       on('support:message:new', (msg) => {
+        // Don't create notification for messages sent by the current user
+        const senderId = msg.senderId || msg.sender_id;
+        const senderType = msg.senderType || msg.type;
+        if (senderId === user?.id) return;
+        // Don't notify for bot messages either (they are auto-generated)
+        if (senderType === 'bot') return;
+        
         queryClient.invalidateQueries(['notifications']);
-        setVirtualNotifications(prev => [
-          {
-            id: `v-msg-${msg.id || Date.now()}`,
-            type: 'info',
-            title: 'New Support Message',
-            message: msg.content || msg.text,
-            created_at: new Date().toISOString(),
-            is_read: false,
-            link: '/support-management'
-          },
-          ...prev
-        ]);
+        setVirtualNotifications(prev => {
+          // Avoid duplicates for same message
+          const existingId = `v-msg-${msg.id || ''}`;
+          if (msg.id && prev.some(n => n.id === existingId)) return prev;
+          
+          const tId = msg.ticketId || msg.ticket_id;
+          return [
+            {
+              id: existingId || `v-msg-${Date.now()}`,
+              type: 'support',
+              title: senderType === 'agent' ? 'Agent Reply' : 'New Support Message',
+              message: msg.content || msg.text,
+              created_at: new Date().toISOString(),
+              is_read: false,
+              link: tId ? `/support-management?ticketId=${tId}` : '/support-management'
+            },
+            ...prev
+          ];
+        });
       }),
       on('support:ticket:new', (ticket) => {
         queryClient.invalidateQueries(['notifications']);
-        setVirtualNotifications(prev => [
-          {
-            id: `v-tkt-${ticket.id || Date.now()}`,
-            type: 'success',
-            title: 'New Support Ticket',
-            message: `${ticket.category}: ${ticket.title}`,
-            created_at: new Date().toISOString(),
-            is_read: false,
-            link: '/support-management'
-          },
-          ...prev
-        ]);
+        setVirtualNotifications(prev => {
+          const existingId = `v-tkt-${ticket.id || ''}`;
+          if (ticket.id && prev.some(n => n.id === existingId)) return prev;
+          
+          return [
+            {
+              id: existingId || `v-tkt-${Date.now()}`,
+              type: 'success',
+              title: 'New Support Ticket',
+              message: `${ticket.category}: ${ticket.title}`,
+              created_at: new Date().toISOString(),
+              is_read: false,
+              link: ticket.id ? `/support-management?ticketId=${ticket.id}` : '/support-management'
+            },
+            ...prev
+          ];
+        });
       }),
       on('support:ticket:updated', (ticket) => {
         queryClient.invalidateQueries(['notifications']);
+        // Only notify if we're not the one who triggered the update
+        setVirtualNotifications(prev => {
+          const existingId = `v-upd-${ticket.id || ''}-${ticket.status || ''}`;
+          if (prev.some(n => n.id === existingId)) return prev;
+          
+          return [
+            {
+              id: existingId || `v-upd-${Date.now()}`,
+              type: 'warning',
+              title: 'Ticket Updated',
+              message: `"${ticket.title}" — ${ticket.status}`,
+              created_at: new Date().toISOString(),
+              is_read: false,
+              link: '/support-management'
+            },
+            ...prev
+          ];
+        });
+      }),
+      on('support:ticket:assigned', (data) => {
+        queryClient.invalidateQueries(['notifications']);
+        const tId = data.ticketId || data.ticket_id || data.id;
         setVirtualNotifications(prev => [
           {
-            id: `v-upd-${ticket.id || Date.now()}-${Date.now()}`,
-            type: 'warning',
-            title: 'Support Ticket Updated',
-            message: `Ticket "${ticket.title}" status: ${ticket.status}`,
+            id: `v-assign-${Date.now()}`,
+            type: 'support',
+            title: 'Ticket Assigned',
+            message: data.message || 'A ticket has been assigned to you',
             created_at: new Date().toISOString(),
             is_read: false,
-            link: '/support-management'
+            link: tId ? `/support-management?ticketId=${tId}` : '/support-management'
           },
           ...prev
         ]);
       })
     ];
     return () => cleanup.forEach(fn => fn && fn());
-  }, [on, queryClient]);
+  }, [on, queryClient, user?.id]);
+
+  // Clean up virtual notifications when real ones arrive (after polling)
+  useEffect(() => {
+    if (notifications.length > 0 && virtualNotifications.length > 0) {
+      // Remove virtual notifications older than 60 seconds (they should be in real notifications by now)
+      const cutoff = Date.now() - 60000;
+      setVirtualNotifications(prev => 
+        prev.filter(n => new Date(n.created_at).getTime() > cutoff)
+      );
+    }
+  }, [notifications]);
 
   /* Close on outside click */
   useEffect(() => {
@@ -134,6 +190,7 @@ export default function NotificationBell() {
     mutationFn: () => notificationsAPI.markAllRead(),
     onSuccess: () => {
       queryClient.invalidateQueries(['notifications'])
+      setVirtualNotifications(prev => prev.map(n => ({ ...n, is_read: true })))
       setTab('all')
     },
   })
@@ -177,7 +234,7 @@ export default function NotificationBell() {
         }}>
         <Bell size={15} />
         {totalUnread > 0 && (
-          <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] rounded-full flex items-center justify-center text-white font-bold"
+          <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] rounded-full flex items-center justify-center text-white font-bold animate-pulse"
             style={{ background: 'rgb(var(--accent))', fontSize: 9, padding: '0 4px' }}>
             {totalUnread > 99 ? '99+' : totalUnread}
           </span>
@@ -201,7 +258,7 @@ export default function NotificationBell() {
               )}
             </div>
             <div className="flex items-center gap-1">
-              {unreadCount > 0 && (
+              {(unreadCount > 0 || virtualNotifications.some(n => !n.is_read)) && (
                 <button onClick={() => markAllMutation.mutate()}
                   disabled={markAllMutation.isPending}
                   className="btn-ghost p-1.5 text-xs"

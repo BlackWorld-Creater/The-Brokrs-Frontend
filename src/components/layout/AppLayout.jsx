@@ -11,6 +11,7 @@ import useAuthStore from '../../store/authStore'
 import useThemeStore from '../../store/themeStore'
 import NotificationBell from '../ui/NotificationBell'
 import CompanyContextBar from '../ui/CompanyContextBar'
+import { useSocket } from '../../hooks/useSocket'
 import toast from 'react-hot-toast'
 import { useQuery } from '@tanstack/react-query'
 import { notificationsAPI } from '../../services/api'
@@ -82,6 +83,9 @@ const NAV_GROUPS = [
 function NavGroup({ group, onClose, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen)
   const { canAccess } = useAuthStore()
+  const location = useLocation()
+  const { on } = useSocket()
+  const [supportUnread, setSupportUnread] = useState(0)
   
   const { data } = useQuery({
     queryKey: ['notifications'],
@@ -89,6 +93,38 @@ function NavGroup({ group, onClose, defaultOpen = true }) {
     staleTime: 30000,
   })
   const unreadCount = data?.unreadCount || 0
+
+  // Real-time socket tracking for support notifications
+  useEffect(() => {
+    const cleanup = [
+      on('support:ticket:new', () => {
+        // Only increment if not currently on support page
+        if (location.pathname !== '/support-management') {
+          setSupportUnread(prev => prev + 1)
+        }
+      }),
+      on('support:message:new', (msg) => {
+        const senderType = msg.senderType || msg.type
+        // Only notify for user messages (not agent or bot messages we sent)
+        if (senderType === 'user' && location.pathname !== '/support-management') {
+          setSupportUnread(prev => prev + 1)
+        }
+      }),
+      on('support:ticket:assigned', () => {
+        if (location.pathname !== '/support-management') {
+          setSupportUnread(prev => prev + 1)
+        }
+      }),
+    ]
+    return () => cleanup.forEach(fn => fn && fn())
+  }, [on, location.pathname])
+
+  // Reset support unread when visiting support page
+  useEffect(() => {
+    if (location.pathname === '/support-management') {
+      setSupportUnread(0)
+    }
+  }, [location.pathname])
 
   const visible = group.items.filter(i => canAccess(i.module))
   if (!visible.length) return null
@@ -106,7 +142,7 @@ function NavGroup({ group, onClose, defaultOpen = true }) {
       </button>
       {open && visible.map(({ path, icon: Icon, label }) => {
         const isSupport = path === '/support-management'
-        const hasUnread = isSupport && unreadCount > 0
+        const hasUnread = isSupport && (supportUnread > 0 || unreadCount > 0)
         
         return (
           <NavLink key={path} to={path} onClick={onClose}
@@ -114,7 +150,7 @@ function NavGroup({ group, onClose, defaultOpen = true }) {
             <div className="relative">
               <Icon size={15} className="nav-icon flex-shrink-0" />
               {hasUnread && (
-                <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full border-2 border-white dark:border-gray-900" />
+                <span className={`absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full border-2 border-white dark:border-gray-900 ${supportUnread > 0 ? 'animate-pulse' : ''}`} />
               )}
             </div>
             <span className="flex-1 text-sm">{label}</span>

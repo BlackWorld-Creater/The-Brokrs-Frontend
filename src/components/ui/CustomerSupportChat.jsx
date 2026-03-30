@@ -1,10 +1,28 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { MessageSquare, X, Send, User, Zap, Paperclip, Smile, Settings, ChevronLeft, Calendar, HelpCircle, Truck, CreditCard } from 'lucide-react';
+import { MessageSquare, X, Send, User, Zap, Paperclip, Smile, Settings, ChevronLeft, Calendar, HelpCircle, Truck, CreditCard, Bot } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useSocket } from '../../hooks/useSocket';
 import { supportAPI } from '../../services/api';
 import useAuthStore from '../../store/authStore';
 import toast from 'react-hot-toast';
+
+/* ── System Message (centered chip) ─────────────────────────────── */
+function SystemMessage({ text }) {
+  return (
+    <div className="flex justify-center my-3">
+      <span
+        className="inline-block text-[11px] font-medium px-4 py-1.5 rounded-full text-center max-w-[85%]"
+        style={{
+          background: 'rgba(0,0,0,0.06)',
+          color: '#6b7280',
+          letterSpacing: '0.01em',
+        }}
+      >
+        {text}
+      </span>
+    </div>
+  );
+}
 
 const CustomerSupportChat = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -17,6 +35,7 @@ const CustomerSupportChat = () => {
   const [loading, setLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [agentTyping, setAgentTyping] = useState(null);
+  const [hasNewMessage, setHasNewMessage] = useState(false);
 
   const { socket, on, emit } = useSocket();
   const { isAuthenticated, user } = useAuthStore();
@@ -26,7 +45,7 @@ const CustomerSupportChat = () => {
   const chatContainerRef = useRef(null);
   const audioRef = useRef(new Audio('https://assets.mixkit.co/active_storage/sfx/2354/2354-preview.mp3'));
 
-  // Remove old polling logic. Use Sockets instead.
+  // Socket listeners
   useEffect(() => {
     if (!socket || !activeTicketId) return;
     
@@ -36,38 +55,42 @@ const CustomerSupportChat = () => {
     const cleanup = [
       on('support:message:new', (msg) => {
         if (msg.ticketId === activeTicketId || msg.ticket_id === activeTicketId) {
+          const senderType = msg.senderType || msg.type;
+          const msgText = msg.content || msg.text;
+
           setMessages(prev => {
             // 1. Avoid exact ID duplicates
             if (prev.find(m => m.id === msg.id)) return prev;
             
-            // 2. Check for optimistic "temp" message with same text and type
-            const tempIndex = prev.findIndex(m => 
-              m.id?.toString().startsWith('temp-') && 
-              m.text === (msg.content || msg.text) &&
-              (m.type === (msg.senderType || msg.type))
-            );
-
-            if (tempIndex !== -1) {
-              const next = [...prev];
-              next[tempIndex] = {
-                ...msg,
-                type: msg.senderType || msg.type,
-                text: msg.content || msg.text,
-                time: msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now'
-              };
-              return next;
+            // 2. If this was sent by current user (user type), check optimistic
+            if (senderType === 'user') {
+              const tempIndex = prev.findIndex(m => 
+                m.id?.toString().startsWith('temp-') && 
+                m.text === msgText
+              );
+              if (tempIndex !== -1) {
+                const next = [...prev];
+                next[tempIndex] = {
+                  ...msg,
+                  type: senderType,
+                  text: msgText,
+                  time: msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now'
+                };
+                return next;
+              }
             }
 
             return [...prev, {
               ...msg,
-              type: msg.senderType || msg.type,
-              text: msg.content || msg.text,
+              type: senderType,
+              text: msgText,
               time: msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now'
             }];
           });
 
-          // Notification logic for guests
-          if ((msg.senderType === 'agent' || msg.senderType === 'bot') && !isOpen) {
+          // Notification for agent/bot messages when chat is closed
+          if ((senderType === 'agent' || senderType === 'bot') && !isOpen) {
+            setHasNewMessage(true);
             toast('New message from Support', { 
               icon: '💬',
               onClick: () => setIsOpen(true)
@@ -94,7 +117,7 @@ const CustomerSupportChat = () => {
         setMessages(prev => [...prev, {
           id: 'handover-' + Date.now(),
           type: 'system',
-          text: `Agent ${name} has joined the conversation.`,
+          text: `${name} has joined the conversation`,
           time: 'System'
         }]);
       }),
@@ -104,15 +127,14 @@ const CustomerSupportChat = () => {
           const name = agent.first_name ? `${agent.first_name} ${agent.last_name || ''}`.trim() : 
                        agent.name || agent.firstName || 'Support Specialist';
           
-          // Only add handover message if we didn't have an assignee before
           setMessages(prev => {
-            const alreadyHandover = prev.some(m => m.type === 'system' && m.text.includes('joined'));
+            const alreadyHandover = prev.some(m => m.type === 'system' && m.text.includes('assigned') || m.text.includes('joined'));
             if (alreadyHandover) return prev;
 
             return [...prev, {
-              id: 'handover-' + Date.now(),
+              id: 'assigned-' + Date.now(),
               type: 'system',
-              text: `Agent ${name} has joined the conversation.`,
+              text: `${name} was assigned to this conversation`,
               time: 'System'
             }];
           });
@@ -123,7 +145,7 @@ const CustomerSupportChat = () => {
           setMessages(prev => [...prev, {
             id: 'resolved-' + Date.now(),
             type: 'system',
-            text: `This ticket has been marked as resolved.`,
+            text: 'This ticket has been resolved',
             time: 'System'
           }]);
         }
@@ -131,12 +153,13 @@ const CustomerSupportChat = () => {
     ];
 
     return () => cleanup.forEach(fn => fn && fn());
-  }, [socket, activeTicketId, on, emit]);
+  }, [socket, activeTicketId, on, emit, isOpen]);
 
   // Initial fetch for tickets when opened
   useEffect(() => {
     if (isOpen && currentView === 'tickets') {
       fetchTickets();
+      setHasNewMessage(false);
     }
   }, [isOpen, currentView]);
 
@@ -202,7 +225,7 @@ const CustomerSupportChat = () => {
       };
       
       if (!isAuthenticated) {
-        payload.guestName = "Guest User"; // In a real app, you might ask for this
+        payload.guestName = "Guest User";
         payload.guestEmail = "guest@example.com";
       }
 
@@ -211,7 +234,6 @@ const CustomerSupportChat = () => {
         const ticketId = res.data.data.id || res.data.data.ticket?.id;
         setActiveTicketId(ticketId);
         setCurrentView('chat');
-        // Join room immediately
         emit('support:room:join', ticketId);
         fetchMessages(ticketId);
       }
@@ -234,7 +256,7 @@ const CustomerSupportChat = () => {
     emit('typing:stop', { ticketId: activeTicketId });
     clearTimeout(typingTimeoutRef.current);
 
-    // Optimistic UI Update
+    // Optimistic UI Update — shown on RIGHT for user
     const optMsg = {
       id: "temp-" + Date.now(),
       type: 'user',
@@ -246,15 +268,12 @@ const CustomerSupportChat = () => {
 
     try {
       const res = await supportAPI.sendMessage(activeTicketId, { text: tmpMessage });
-      // Emit message:send after successful POST
       if (res.data.success || res.data.status === 'success') {
         emit('message:send', { ticketId: activeTicketId, message: res.data.data });
-        // Update the optimistic message with real data if needed or just fetch
         fetchMessages(activeTicketId, false);
       }
     } catch (err) {
       console.error("Failed to send msg", err);
-      // Remove optimistic message on error
       setMessages(prev => prev.filter(m => m.id !== optMsg.id));
     }
   };
@@ -293,6 +312,66 @@ const CustomerSupportChat = () => {
     setActiveTicketId(id);
     setCurrentView('chat');
     fetchMessages(id);
+  };
+
+  /* ── Render a single message bubble ───────────────────────────── */
+  const renderMessage = (msg) => {
+    // System messages → centered chip
+    if (msg.type === 'system') {
+      return <SystemMessage key={msg.id} text={msg.text} />;
+    }
+
+    // User's own messages appear on the RIGHT
+    const isMine = msg.type === 'user';
+
+    return (
+      <motion.div 
+        initial={{ opacity: 0, x: isMine ? 20 : -20, y: 10 }}
+        animate={{ opacity: 1, x: 0, y: 0 }}
+        transition={{ duration: 0.3 }}
+        key={msg.id} 
+        className={`flex gap-2.5 ${isMine ? 'flex-row-reverse' : 'flex-row'}`}
+      >
+        {/* Avatar */}
+        <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 shadow-sm ${
+          isMine 
+            ? 'bg-indigo-600' 
+            : msg.type === 'bot' 
+              ? 'bg-gradient-to-br from-violet-500 to-purple-600' 
+              : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700'
+        }`}>
+          {isMine ? (
+            <User size={12} className="text-white" />
+          ) : msg.type === 'bot' ? (
+            <Zap size={12} className="text-white" />
+          ) : (
+            <User size={12} className="text-indigo-500" />
+          )}
+        </div>
+
+        {/* Bubble + Time */}
+        <div className={`max-w-[75%] flex flex-col ${isMine ? 'items-end' : 'items-start'}`}>
+          {/* Sender label for agent */}
+          {!isMine && msg.type === 'agent' && (
+            <span className="text-[10px] font-semibold text-indigo-500 mb-0.5 px-1">Support Agent</span>
+          )}
+          {!isMine && msg.type === 'bot' && (
+            <span className="text-[10px] font-semibold text-purple-500 mb-0.5 px-1">Support Bot</span>
+          )}
+
+          <div className={`px-3.5 py-2.5 text-[13px] leading-relaxed shadow-sm ${
+            isMine 
+              ? 'bg-gradient-to-br from-indigo-500 to-indigo-600 text-white rounded-2xl rounded-br-md' 
+              : msg.type === 'bot'
+                ? 'bg-gradient-to-br from-violet-50 to-purple-50 dark:from-violet-900/20 dark:to-purple-900/20 text-gray-800 dark:text-gray-100 border border-violet-200 dark:border-violet-800/40 rounded-2xl rounded-bl-md'
+                : 'bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-700 rounded-2xl rounded-bl-md'
+          }`}>
+            {msg.text}
+          </div>
+          <span className="text-[9px] mt-1 font-medium px-1 text-gray-400">{msg.time}</span>
+        </div>
+      </motion.div>
+    );
   };
 
   return (
@@ -414,45 +493,24 @@ const CustomerSupportChat = () => {
               <>
                 <div 
                   ref={scrollRef}
-                  className="flex-1 p-5 overflow-y-auto space-y-4 bg-gray-50 dark:bg-gray-900 scroll-smooth border-t border-gray-200 dark:border-gray-800"
+                  className="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50 dark:bg-gray-900 scroll-smooth border-t border-gray-200 dark:border-gray-800"
+                  style={{
+                    backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%239C92AC\' fill-opacity=\'0.03\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")',
+                  }}
                 >
                   {loading && messages.length === 0 ? (
                     <div className="flex justify-center items-center h-full text-indigo-400">
                       <Zap className="animate-pulse" size={24} />
                     </div>
                   ) : (
-                    messages.map((msg) => (
-                      <motion.div 
-                        initial={{ opacity: 0, x: msg.type === 'user' ? 20 : -20, y: 10 }}
-                        animate={{ opacity: 1, x: 0, y: 0 }}
-                        transition={{ duration: 0.3 }}
-                        key={msg.id} 
-                        className={`flex gap-3 ${msg.type === 'user' ? 'flex-row-reverse' : ''}`}
-                      >
-                        <div className={`w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm ${
-                          msg.type === 'user' ? 'bg-indigo-600' : 'bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700'
-                        }`}>
-                          {msg.type === 'user' ? <User size={14} className="text-white" /> : <Zap size={14} className="text-indigo-500" />}
-                        </div>
-                        <div className={`max-w-[75%] flex flex-col ${msg.type === 'user' ? 'items-end' : ''}`}>
-                          <div className={`px-4 py-2.5 rounded-2xl text-[13px] leading-relaxed shadow-sm ${
-                            msg.type === 'user' 
-                              ? 'bg-gradient-to-br from-indigo-500 to-indigo-600 text-white rounded-tr-none' 
-                              : 'bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-700 rounded-tl-none'
-                          }`}>
-                            {msg.text}
-                          </div>
-                          <span className="text-[9px] mt-1.5 font-medium px-1 text-gray-400 uppercase tracking-tight">{msg.time}</span>
-                        </div>
-                      </motion.div>
-                    ))
+                    messages.map(renderMessage)
                   )}
                   {agentTyping && (
                     <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} className="flex gap-2 items-center text-[11px] text-gray-500 italic pb-2">
                       <div className="flex gap-1">
-                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                        <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                       </div>
                       {agentTyping} is typing...
                     </motion.div>
@@ -495,7 +553,7 @@ const CustomerSupportChat = () => {
           animate={{ scale: 1, opacity: 1 }}
           whileHover={{ scale: 1.08, rotate: isOpen ? 90 : 5 }}
           whileTap={{ scale: 0.94 }}
-          onClick={() => setIsOpen(!isOpen)}
+          onClick={() => { setIsOpen(!isOpen); if (!isOpen) setHasNewMessage(false); }}
           className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-[0_8px_30px_rgb(0,0,0,0.12)] transition-all duration-300 group relative overflow-hidden backdrop-blur-md ${
             isOpen 
               ? 'bg-gray-800 dark:bg-gray-100 text-white dark:text-gray-900 rotate-90' 
@@ -516,10 +574,10 @@ const CustomerSupportChat = () => {
           </AnimatePresence>
         </motion.button>
         <AnimatePresence>
-          {!isOpen && tickets.length > 0 && (
+          {!isOpen && (hasNewMessage || tickets.length > 0) && (
             <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }} className="absolute -top-1.5 -right-1.5 z-[110]">
               <span className="relative flex h-4 w-4">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                <span className={`absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75 ${hasNewMessage ? 'animate-ping' : ''}`}></span>
                 <span className="relative inline-flex rounded-full h-4 w-4 bg-red-500 border-2 border-white dark:border-gray-900"></span>
               </span>
             </motion.div>
