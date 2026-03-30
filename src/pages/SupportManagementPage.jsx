@@ -71,9 +71,9 @@ export default function SupportManagementPage() {
   // Derived state
   const activeTicket = tickets?.find(t => t.id === activeTicketId);
   const activeAgentId = activeTicket?.assignedTo?.id || activeTicket?.assignedTo;
-  const isAssignedToMe = activeAgentId === user?.id;
-  const isAssignedToOther = activeAgentId && activeAgentId !== user?.id;
-  // Admin can only view if ticket is assigned to another agent — no override
+  
+  // A conversation is handled by ANOTHER agent if assignedTo is set and not to me
+  const isAssignedToOther = activeAgentId && String(activeAgentId) !== String(user?.id);
   const canSendMessage = activeTicket && activeTicket.status !== 'resolved' && !isAssignedToOther;
 
   // Load messages when ticket changes
@@ -129,24 +129,37 @@ export default function SupportManagementPage() {
             // 1. Avoid exact ID duplicates
             if (prev.find(m => m.id === msg.id)) return prev;
 
-            // 2. If this was sent by current user (agent type), check optimistic
-            if (senderId === user?.id || senderType === 'agent') {
-              const tempIndex = prev.findIndex(m => 
-                m.id?.toString().startsWith('temp-') && 
-                m.text === msgText
+            // 2. Identify and handle "echo" messages
+            // Check if this came from the current user (using ID or type)
+            const isMine = (senderId && String(senderId) === String(user?.id)) || (senderType === 'agent');
+            const typeToUse = isMine ? 'agent' : (senderType || 'user');
+
+            if (isMine) {
+              // Match against optimistic messages (temp- IDs) or same content from agent
+              const existingIndex = prev.findIndex(m => 
+                (m.id?.toString().startsWith('temp-') && m.text === msgText) ||
+                (m.text === msgText && m.type === 'agent')
               );
-              if (tempIndex !== -1) {
+              
+              if (existingIndex !== -1) {
                 const next = [...prev];
-                next[tempIndex] = { ...msg, type: senderType, text: msgText };
+                // Replace the temporary/previous message with the server's official message
+                next[existingIndex] = { 
+                  ...msg, 
+                  type: 'agent', 
+                  text: msgText,
+                  time: msg.created_at ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now'
+                };
                 return next;
               }
-              // DUPLICATION FIX: If we already have this exact text and it's from our own agent send, skip adding it as new
-              // Use a more robust check: if an ID already exists or content matches exactly 
-              const duplicate = prev.some(m => (m.id === msg.id) || (m.text === msgText && m.type === senderType && !m.id?.toString().startsWith('temp-')));
-              if (duplicate) return prev;
+
+              // If exact content exists from agent, don't add it as a new bubble (prevents ghost duplication)
+              if (prev.some(m => m.text === msgText && m.type === 'agent')) {
+                return prev;
+              }
             }
 
-            return [...prev, { ...msg, type: senderType, text: msgText }];
+            return [...prev, { ...msg, type: typeToUse, text: msgText }];
           });
         } else {
           // If message is for a different ticket and NOT from current user, show notification
@@ -277,7 +290,10 @@ export default function SupportManagementPage() {
 
   const handleSend = async (e) => {
     e.preventDefault();
-    if (!message.trim() || !activeTicketId || !canSendMessage) return;
+    if (!message.trim() || !activeTicketId || !canSendMessage) {
+      if (isAssignedToOther) toast.error('Handover complete — Read only mode');
+      return;
+    }
 
     const tmpText = message;
     setMessage('');
